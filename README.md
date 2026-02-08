@@ -1,299 +1,188 @@
-# OPNet Ordinals Indexer Plugin
+# OPNet Ordinals Indexer + OP721 Bridge
 
-A production-ready plugin for indexing Bitcoin Ordinals inscriptions on the OPNet blockchain.
+Indexes Bitcoin Ordinals inscriptions on the OPNet blockchain and provides an optional burn-to-mint bridge that lets users burn their Ordinals and receive an OP721 NFT on OPNet.
 
-## Features
+## How It Works
 
-- 🔍 **Real-time indexing** of Ordinals inscriptions from OPNet blocks
-- 💾 **PostgreSQL storage** with optimized indexes for fast queries
-- 🌐 **REST API** for querying inscriptions, owners, and statistics
-- 🔄 **Reorg handling** to maintain data consistency during chain reorganizations
-- 📊 **Statistics tracking** for inscriptions, owners, and content types
-- ⚡ **High performance** with concurrent processing and caching
+**Indexer** — Scans OPNet blocks via JSON-RPC, extracts Ordinals inscription envelopes from witness data, stores them in PostgreSQL, and exposes a REST API.
 
-## Installation
+**Bridge** (optional) — Monitors for inscriptions sent to a burn address. When a burn is detected and confirmed, the deployer/oracle calls `attestBurn()` on the OP721 contract to mint the corresponding NFT to the sender.
+
+```
+Bitcoin Block → Plugin → Parser (witness envelopes) → PostgreSQL
+                  ↓                                        ↓
+            Burn Detector → Bridge Service            REST API
+                  ↓
+         attestBurn() → OP721 Contract → NFT minted
+```
+
+## Prerequisites
+
+- Node.js >= 22.0.0
+- PostgreSQL
+
+## Setup
 
 ```bash
-# Install dependencies
 npm install
-
-# Copy environment config
 cp .env.example .env
-
 # Edit .env with your configuration
-nano .env
-
-# Build the plugin
-npm run build
 ```
 
 ## Configuration
 
-Edit `.env` file:
+See `.env.example` for all options. Core settings:
 
-```env
-# OPNet RPC URL
-OPNET_RPC_URL=https://regtest.opnet.org
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPNET_RPC_URL` | OPNet JSON-RPC endpoint | `https://regtest.opnet.org` |
+| `NETWORK` | `mainnet`, `testnet`, or `regtest` | `regtest` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://localhost/ordinals` |
+| `API_PORT` | REST API port | `3002` |
+| `START_HEIGHT` | Block height to start indexing from | `0` |
 
-# Network (mainnet, testnet, or regtest)
-NETWORK=regtest
+### Bridge (optional)
 
-# PostgreSQL database URL
-DATABASE_URL=postgresql://localhost/ordinals
+Set both `BRIDGE_BURN_ADDRESS` and `BRIDGE_COLLECTION_FILE` to enable:
 
-# API server port
-API_PORT=3002
+| Variable | Description |
+|----------|-------------|
+| `BRIDGE_BURN_ADDRESS` | Address users send inscriptions to burn (e.g. `1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa`) |
+| `BRIDGE_COLLECTION_FILE` | Path to collection JSON file |
+| `BRIDGE_COLLECTION_NAME` | Display name for the collection |
+| `BRIDGE_COLLECTION_SYMBOL` | Symbol (e.g. `MC`) |
+| `BRIDGE_CONFIRMATIONS` | Block confirmations required before minting (default: `6`) |
 
-# Starting block height for indexing
-START_HEIGHT=0
+### Collection JSON Format
 
-# Enable REST API
-ENABLE_API=true
+```json
+[
+  {
+    "id": "abc123...i0",
+    "meta": {
+      "name": "#0001",
+      "attributes": [...]
+    }
+  }
+]
 ```
 
-## Database Setup
-
-Create a PostgreSQL database:
-
-```bash
-createdb ordinals
-```
-
-The plugin will automatically create the required tables and indexes on first run.
+Each item's `id` is the Ordinals inscription ID (`{txid}i{index}`). Token IDs are assigned sequentially based on array order.
 
 ## Usage
 
-### Start the indexer
-
 ```bash
+# Build
+npm run build
+
+# Start
 npm start
-```
 
-The plugin will:
-1. Connect to the OPNet RPC endpoint
-2. Initialize the database schema
-3. Start the REST API server (if enabled)
-4. Begin indexing blocks from `START_HEIGHT`
-
-### Development mode
-
-```bash
+# Development (watch mode)
 npm run dev
-```
 
-This runs TypeScript in watch mode for development.
+# Run tests
+npm test
+```
 
 ## REST API
 
-### Endpoints
+### Indexer Endpoints
 
-#### Health Check
-```
-GET /health
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check |
+| GET | `/inscription/:id` | Get inscription by ID |
+| GET | `/content/:id` | Raw inscription content (binary) |
+| GET | `/inscriptions/owner/:address` | Inscriptions by owner (`?limit=&offset=`) |
+| GET | `/inscriptions/latest` | Latest inscriptions (`?limit=`) |
+| GET | `/inscriptions/type/:contentType` | Inscriptions by MIME type (`?limit=`) |
+| GET | `/stats` | Indexer statistics |
 
-Returns the health status of the indexer.
+### Bridge Endpoints
 
-#### Get Inscription by ID
-```
-GET /inscription/:id
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/bridge/stats` | Bridge statistics |
+| GET | `/bridge/claim/:inscriptionId` | Claim status for an inscription |
+| GET | `/bridge/claims/sender/:address` | All claims by sender address |
+| GET | `/bridge/collection` | Collection info and size |
+| GET | `/bridge/collection/check/:inscriptionId` | Check if inscription is in collection |
+| GET | `/bridge/collection/token/:tokenId` | Get collection item by token ID |
+| POST | `/bridge/retry-failed` | Retry failed attestations |
 
-Example: `/inscription/abc123:0`
+## Smart Contract
 
-Returns full inscription data including base64-encoded content.
-
-#### Get Inscription Content
-```
-GET /content/:id
-```
-
-Example: `/content/abc123:0`
-
-Returns the raw inscription content with appropriate `Content-Type` header.
-
-#### Get Inscriptions by Owner
-```
-GET /inscriptions/owner/:address?limit=100&offset=0
-```
-
-Example: `/inscriptions/owner/bc1p...?limit=50`
-
-Returns inscriptions owned by a specific Bitcoin address.
-
-#### Get Latest Inscriptions
-```
-GET /inscriptions/latest?limit=20
-```
-
-Returns the most recent inscriptions.
-
-#### Get Inscriptions by Content Type
-```
-GET /inscriptions/type/:contentType?limit=100
-```
-
-Example: `/inscriptions/type/image%2Fpng`
-
-Returns inscriptions of a specific MIME type.
-
-#### Get Statistics
-```
-GET /stats
-```
-
-Returns indexer statistics including:
-- Total inscriptions
-- Total unique owners
-- Content type breakdown
-
-### API Examples
+The OP721 contract is in `contract/` (AssemblyScript, compiles to WASM).
 
 ```bash
-# Get latest inscriptions
-curl http://localhost:3002/inscriptions/latest
-
-# Get specific inscription
-curl http://localhost:3002/inscription/abc123:0
-
-# View inscription image
-curl http://localhost:3002/content/abc123:0 > inscription.png
-
-# Get inscriptions for an address
-curl http://localhost:3002/inscriptions/owner/bc1p...
-
-# Get statistics
-curl http://localhost:3002/stats
+cd contract
+npm install
+npm run build
+# Output: contract/build/OrdinalsBridgeNFT.wasm
 ```
 
-## Architecture
+### Contract Methods
 
-### Components
+| Method | Access | Description |
+|--------|--------|-------------|
+| `attestBurn(to, inscriptionHash, tokenId)` | Deployer only | Mint OP721 after verifying inscription burn |
+| `isInscriptionClaimed(inscriptionHash)` | Public | Check if an inscription has been bridged |
+| `attestCount()` | Public | Total attestations processed |
+| *+ all standard OP721 methods* | | `name`, `symbol`, `ownerOf`, `balanceOf`, `safeTransfer`, etc. |
 
-1. **OrdinalsParser** (`src/parser.ts`)
-   - Parses Bitcoin witness data for Ordinals inscription envelopes
-   - Decodes Bitcoin addresses from output scripts
-   - Handles OP_FALSE OP_IF "ord" envelope format
-
-2. **InscriptionDatabase** (`src/database.ts`)
-   - PostgreSQL storage layer
-   - Optimized indexes for queries
-   - Reorg handling with rollback support
-
-3. **OrdinalsAPI** (`src/api.ts`)
-   - Express REST API server
-   - CORS enabled
-   - Efficient pagination
-
-4. **OrdinalsIndexerPlugin** (`src/plugin.ts`)
-   - Main plugin orchestrator
-   - Block processing and transaction parsing
-   - Integration with OPNet provider
-
-### Data Flow
-
-```
-OPNet RPC → OrdinalsIndexerPlugin → OrdinalsParser → InscriptionDatabase
-                                                            ↓
-                                                      OrdinalsAPI
-```
-
-## Database Schema
-
-```sql
-CREATE TABLE inscriptions (
-    id TEXT PRIMARY KEY,              -- txid:vout
-    content_type TEXT NOT NULL,       -- MIME type
-    content BYTEA NOT NULL,           -- Inscription data
-    block_height INTEGER NOT NULL,
-    block_hash TEXT NOT NULL,
-    txid TEXT NOT NULL,
-    vout INTEGER NOT NULL,
-    owner TEXT NOT NULL,              -- Bitcoin address
-    timestamp BIGINT NOT NULL,
-    inscription_number INTEGER NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Optimized indexes
-CREATE INDEX idx_inscriptions_owner ON inscriptions(owner);
-CREATE INDEX idx_inscriptions_block_height ON inscriptions(block_height);
-CREATE INDEX idx_inscriptions_inscription_number ON inscriptions(inscription_number);
-CREATE INDEX idx_inscriptions_txid ON inscriptions(txid);
-CREATE INDEX idx_inscriptions_content_type ON inscriptions(content_type);
-```
-
-## Reorg Handling
-
-The plugin automatically handles blockchain reorganizations:
-
-1. Detects when a reorg occurs
-2. Deletes inscriptions from orphaned blocks
-3. Reprocesses blocks from the fork point
-4. Maintains data consistency
-
-## Performance
-
-- **Concurrent processing** of transactions within blocks
-- **Database connection pooling** for high throughput
-- **Optimized indexes** for fast queries
-- **Efficient witness data parsing**
-
-## Monitoring
-
-Check indexer status programmatically:
+### Client-Side ABI
 
 ```typescript
-import { OrdinalsIndexerPlugin } from '@opnet/ordinals-indexer-plugin';
+import { ORDINALS_BRIDGE_NFT_ABI, IOrdinalsBridgeNFTContract } from 'opnet-ordinals-plugin';
+import { getContract } from 'opnet';
 
-const status = plugin.getStatus();
-console.log(status);
-// {
-//   currentHeight: 12345,
-//   totalInscriptions: 6789,
-//   isRunning: true,
-//   isSyncing: false
-// }
+const nft = getContract<IOrdinalsBridgeNFTContract>(
+    contractAddress,
+    ORDINALS_BRIDGE_NFT_ABI,
+    provider,
+    network,
+);
 ```
 
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
-opnet-ordinals-plugin/
-├── src/
-│   ├── types.ts          # TypeScript interfaces
-│   ├── parser.ts         # Ordinals envelope parser
-│   ├── database.ts       # PostgreSQL layer
-│   ├── api.ts            # REST API server
-│   ├── plugin.ts         # Main plugin class
-│   └── index.ts          # Entry point
-├── package.json
-├── tsconfig.json
-└── README.md
+src/
+  index.ts            Entry point
+  plugin.ts           Main indexer + bridge orchestrator
+  parser.ts           Ordinals witness envelope parser
+  database.ts         PostgreSQL layer (inscriptions)
+  api.ts              REST API (inscriptions)
+  collection.ts       Collection registry (JSON loader)
+  bridge.ts           Bridge service (burn detection + claim lifecycle)
+  bridge-database.ts  PostgreSQL layer (burn claims)
+  bridge-api.ts       REST API (bridge)
+  bridge-abi.ts       Client-side ABI + TypeScript interface
+  types.ts            Shared type definitions
+contract/
+  src/
+    OrdinalsBridgeNFT.ts   OP721 contract (AssemblyScript)
+    index.ts               Contract entry point
+tests/
+  parser.test.ts           Inscription parser tests
+  integration.test.ts      Plugin integration tests
+  collection.test.ts       Collection registry tests
+  bridge.test.ts           Bridge service tests
+  bridge-database.test.ts  Bridge database tests
+  bridge-api.test.ts       Bridge API tests
 ```
 
-### Build
+## Trust Model
 
-```bash
-npm run build
-```
+The bridge uses an **oracle pattern**. The contract deployer is the trusted attestor who calls `attestBurn()` after verifying burns on-chain. This means:
 
-### Clean
+- Burns are irreversible (sent to an unspendable address)
+- Each inscription can only be bridged once (enforced on-chain)
+- The oracle must be trusted to honestly attest burns
 
-```bash
-npm run clean
-```
+This is the same trust model used by most cross-chain bridges (WBTC, etc.).
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions welcome! Please open an issue or PR.
-
-## Support
-
-For issues or questions, please open an issue on GitHub.
