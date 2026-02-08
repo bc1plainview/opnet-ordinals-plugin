@@ -1,3 +1,6 @@
+import { writeFileSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { CollectionRegistry, type CollectionItem } from '../src/collection.js';
 
 /**
@@ -193,26 +196,33 @@ describe('CollectionRegistry', () => {
     });
 
     describe('loadFromFile', () => {
-        it('should load from motocats.json', () => {
-            const registry2 = new CollectionRegistry('MotoCats', 'MCAT');
-            registry2.loadFromFile(
-                '/Users/mastermindgigachad/Desktop/CLAUDE/opnet-ordinals-plugin/motocats.json',
-            );
+        it('should load from a JSON collection file', () => {
+            // Create a temporary collection file
+            const items = [
+                { id: 'abc123i0', meta: { name: '#0000', attributes: [] } },
+                { id: 'def456i0', meta: { name: '#0001', attributes: [] } },
+                { id: 'ghi789i0', meta: { name: '#0002', attributes: [] } },
+            ];
+            const tmpFile = join(tmpdir(), `test-collection-${Date.now()}.json`);
+            writeFileSync(tmpFile, JSON.stringify(items));
 
-            expect(registry2.size).toBe(10000);
+            try {
+                const registry2 = new CollectionRegistry('TestCol', 'TCOL');
+                registry2.loadFromFile(tmpFile);
 
-            // Check first item
-            const first = registry2.getByTokenId(0);
-            expect(first).toBeDefined();
-            expect(first!.id).toBe(
-                'bacb6587e90fa6d826c78a9931013722510370f1a3e019ad2fff81372e672ddei0',
-            );
-            expect(first!.meta.name).toBe('#0000');
+                expect(registry2.size).toBe(3);
 
-            // Check last item
-            const last = registry2.getByTokenId(9999);
-            expect(last).toBeDefined();
-            expect(last!.tokenId).toBe(9999);
+                const first = registry2.getByTokenId(0);
+                expect(first).toBeDefined();
+                expect(first!.id).toBe('abc123i0');
+                expect(first!.meta.name).toBe('#0000');
+
+                const last = registry2.getByTokenId(2);
+                expect(last).toBeDefined();
+                expect(last!.tokenId).toBe(2);
+            } finally {
+                unlinkSync(tmpFile);
+            }
         });
     });
 

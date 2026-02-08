@@ -1,37 +1,47 @@
 import { Logger } from '@btc-vision/logger';
-import { networks, type Network } from '@btc-vision/bitcoin';
-import { Mnemonic, type Wallet } from '@btc-vision/transaction';
-import { keccak_256 } from '@noble/hashes/sha3.js';
 import {
     getContract,
     JSONRpcProvider,
     type TransactionParameters,
-    type UTXO,
     type InteractionTransactionReceipt,
 } from 'opnet';
+import {
+    Address,
+    AddressTypes,
+    Mnemonic,
+    type UTXO,
+} from '@btc-vision/transaction';
+import { address as btcAddress, networks, type Network } from '@btc-vision/bitcoin';
+import { keccak_256 } from '@noble/hashes/sha3.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import type { BridgeService } from './bridge.js';
+import type { BurnClaim } from './types.js';
 import {
     ORDINALS_BRIDGE_NFT_ABI,
     type IOrdinalsBridgeNFTContract,
 } from './bridge-abi.js';
-import type { BurnClaim } from './types.js';
 
 /**
- * Maximum attestations to process per cycle.
- * Stays under the Bitcoin mempool chain limit of 25 unconfirmed.
+ * Maximum attestations per block cycle to avoid hitting Bitcoin's
+ * 25-unconfirmed-ancestor chain limit.
  */
-const MAX_BATCH_SIZE = 20;
+const MAX_ATTESTATIONS_PER_CYCLE = 20;
 
 /**
- * Default polling interval in milliseconds.
+ * Maximum sats the worker is willing to spend per attestation.
+ * Acts as a safety cap in case fee estimation is unexpectedly high.
  */
-const DEFAULT_POLL_INTERVAL_MS = 30_000;
+const MAX_SATS_PER_ATTESTATION = 100_000n;
 
 /**
- * Automatic attestation worker.
+ * Attestation worker — automatically submits attestBurn() transactions
+ * for confirmed burn claims.
  *
- * Polls for confirmed burn claims and submits `attestBurn()` transactions
- * to the OP721 contract using the deployer wallet.
+ * Lifecycle per block cycle:
+ *   1. Poll BridgeService for claims with status "confirmed"
+ *   2. For each claim: simulate attestBurn → sign → broadcast
+ *   3. Chain UTXOs between transactions within a cycle
+ *   4. Mark claims as "attested" or "failed"
  */
 export class AttestationWorker {
     private readonly logger: Logger = new Logger();
@@ -39,111 +49,130 @@ export class AttestationWorker {
     private readonly provider: JSONRpcProvider;
     private readonly network: Network;
     private readonly contractAddress: string;
-    private readonly wallet: Wallet;
-    private readonly pollIntervalMs: number;
+    private contract: IOrdinalsBridgeNFTContract | null = null;
 
-    /** UTXOs chained between successive attestations within a cycle. */
-    private pendingUtxos: UTXO[] = [];
+    // Wallet derived from deployer mnemonic
+    private readonly wallet: ReturnType<Mnemonic['deriveOPWallet']>;
+
+    // UTXO tracking: chain change outputs between attestations
+    private pendingUtxos: UTXO[] | undefined;
 
     public constructor(
         bridge: BridgeService,
         rpcUrl: string,
-        networkName: 'mainnet' | 'testnet' | 'regtest',
+        networkName: string,
         contractAddress: string,
         deployerMnemonic: string,
-        pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS,
     ) {
         this.bridge = bridge;
         this.contractAddress = contractAddress;
-        this.pollIntervalMs = pollIntervalMs;
-
-        this.network = this.resolveNetwork(networkName);
+        this.network = AttestationWorker.resolveNetwork(networkName);
         this.provider = new JSONRpcProvider(rpcUrl, this.network);
 
-        // Derive deployer wallet from mnemonic
+        // Derive deployer wallet from mnemonic (OPWallet-compatible derivation)
         const mnemonic = new Mnemonic(deployerMnemonic, '', this.network);
-        this.wallet = mnemonic.deriveOPWallet();
+        this.wallet = mnemonic.deriveOPWallet(AddressTypes.P2TR, 0);
 
         this.logger.info(
-            `AttestationWorker initialized — contract: ${contractAddress}, ` +
-            `deployer: ${this.wallet.p2tr}`,
+            `Attestation worker initialized (deployer: ${this.wallet.p2tr})`,
         );
     }
 
     /**
-     * Process all confirmed claims in a single cycle.
-     * Called by the plugin after block processing.
+     * Process all confirmed claims, submit attestBurn transactions, and
+     * return the number of successfully attested claims.
      */
     public async processConfirmedClaims(): Promise<number> {
         const claims = await this.bridge.getClaimsReadyForAttestation();
-        if (claims.length === 0) {
-            return 0;
+        if (claims.length === 0) return 0;
+
+        // Lazily initialize contract instance
+        if (this.contract === null) {
+            this.contract = getContract<IOrdinalsBridgeNFTContract>(
+                this.contractAddress,
+                ORDINALS_BRIDGE_NFT_ABI,
+                this.provider,
+                this.network,
+                this.wallet.address,
+            );
         }
 
-        const batch = claims.slice(0, MAX_BATCH_SIZE);
-        this.logger.info(`Processing ${batch.length} confirmed claim(s) for attestation`);
-
-        let processed = 0;
+        const batch = claims.slice(0, MAX_ATTESTATIONS_PER_CYCLE);
+        let attested = 0;
 
         for (const claim of batch) {
             try {
-                await this.attestClaim(claim);
-                processed++;
+                const success = await this.attestClaim(claim);
+                if (success) attested++;
             } catch (error) {
                 this.logger.error(
-                    `Failed to attest claim ${claim.inscriptionId}: ${String(error)}`,
+                    `Attestation failed for ${claim.inscriptionId}: ${String(error)}`,
                 );
                 await this.bridge.markFailed(claim.inscriptionId);
             }
         }
 
-        return processed;
+        return attested;
     }
 
     /**
-     * Get the polling interval for the worker loop.
+     * Hash an inscription ID string to a u256 for the contract.
+     * Uses keccak256 and returns the hash as a bigint.
      */
-    public getPollIntervalMs(): number {
-        return this.pollIntervalMs;
+    public static hashInscriptionId(inscriptionId: string): bigint {
+        const hash = keccak_256(new TextEncoder().encode(inscriptionId));
+        return BigInt('0x' + bytesToHex(hash));
     }
 
     /**
-     * Compute the keccak256 hash of an inscription ID, returned as a bigint.
+     * Convert a bech32/bech32m Bitcoin address to an OPNet Address.
+     *
+     * For p2tr addresses the witness program IS the 32-byte x-only pubkey,
+     * which can be used directly as an OPNet Address via Address.wrap().
      */
-    public static computeInscriptionHash(inscriptionId: string): bigint {
-        const bytes = new TextEncoder().encode(inscriptionId);
-        const hash = keccak_256(bytes);
-        // Convert 32-byte hash to bigint (big-endian)
-        let result = 0n;
-        for (let i = 0; i < hash.length; i++) {
-            result = (result << 8n) | BigInt(hash[i]);
-        }
-        return result;
+    public static bech32ToAddress(bech32Addr: string): Address {
+        const decoded = btcAddress.fromBech32(bech32Addr);
+        return Address.wrap(decoded.data);
     }
 
     /**
-     * Submit an attestBurn transaction for a single claim.
+     * Get the deployer's p2tr address (useful for diagnostics / logging).
      */
-    private async attestClaim(claim: BurnClaim): Promise<void> {
-        const contract = getContract<IOrdinalsBridgeNFTContract>(
-            this.contractAddress,
-            ORDINALS_BRIDGE_NFT_ABI,
-            this.provider,
-            this.network,
-            this.wallet.address,
-        );
+    public getDeployerAddress(): string {
+        return this.wallet.p2tr;
+    }
 
-        const inscriptionHash = AttestationWorker.computeInscriptionHash(claim.inscriptionId);
+    // ---------------------------------------------------------------
+    // Private helpers
+    // ---------------------------------------------------------------
+
+    private async attestClaim(claim: BurnClaim): Promise<boolean> {
+        if (this.contract === null) return false;
+
+        const inscriptionHash = AttestationWorker.hashInscriptionId(claim.inscriptionId);
         const tokenId = BigInt(claim.tokenId);
 
+        // Convert the sender's bech32 address to an OPNet Address
+        let recipientAddress: Address;
+        try {
+            recipientAddress = AttestationWorker.bech32ToAddress(claim.senderAddress);
+        } catch {
+            this.logger.error(
+                `Cannot convert sender address "${claim.senderAddress}" to OPNet Address ` +
+                `(only bech32/bech32m addresses are supported)`,
+            );
+            await this.bridge.markFailed(claim.inscriptionId);
+            return false;
+        }
+
+        // Step 1: Simulate
         this.logger.debug(
-            `Attesting: inscription=${claim.inscriptionId} hash=${inscriptionHash} ` +
-            `tokenId=${tokenId} to=${claim.senderAddress}`,
+            `Simulating attestBurn for ${claim.inscriptionId} ` +
+            `(token #${claim.tokenId}, to: ${claim.senderAddress})`,
         );
 
-        // Simulate the attestBurn call
-        const simulation = await contract.attestBurn(
-            this.wallet.address,
+        const simulation = await this.contract.attestBurn(
+            recipientAddress,
             inscriptionHash,
             tokenId,
         );
@@ -153,43 +182,56 @@ export class AttestationWorker {
                 `attestBurn reverted for ${claim.inscriptionId}: ${simulation.revert}`,
             );
             await this.bridge.markFailed(claim.inscriptionId);
-            return;
+            return false;
         }
 
-        // Build transaction parameters
-        const txParams: TransactionParameters = {
+        // Step 2: Build transaction params
+        const params: TransactionParameters = {
             signer: this.wallet.keypair,
             mldsaSigner: this.wallet.mldsaKeypair,
             refundTo: this.wallet.p2tr,
-            maximumAllowedSatToSpend: 100_000n,
+            maximumAllowedSatToSpend: MAX_SATS_PER_ATTESTATION,
             feeRate: 0,
             network: this.network,
-            priorityFee: 0n,
-            ...(this.pendingUtxos.length > 0 ? { utxos: this.pendingUtxos } : {}),
+            utxos: this.pendingUtxos,
         };
 
-        // Send the transaction
-        const receipt: InteractionTransactionReceipt = await simulation.sendTransaction(txParams);
-
-        // Chain UTXOs for the next attestation
-        if (receipt.newUTXOs && receipt.newUTXOs.length > 0) {
-            this.pendingUtxos = receipt.newUTXOs;
+        // Step 3: Send
+        let receipt: InteractionTransactionReceipt;
+        try {
+            receipt = await simulation.sendTransaction(params);
+        } catch (error) {
+            this.logger.error(
+                `Broadcast failed for ${claim.inscriptionId}: ${String(error)}`,
+            );
+            await this.bridge.markFailed(claim.inscriptionId);
+            return false;
         }
 
-        // Mark claim as attested
+        // Step 4: Chain UTXOs for next attestation in this cycle
+        this.pendingUtxos = receipt.newUTXOs;
+
+        // Step 5: Mark as attested
         await this.bridge.markAttested(claim.inscriptionId, receipt.transactionId);
 
         this.logger.info(
-            `Attested: ${claim.inscriptionId} -> tx ${receipt.transactionId}`,
+            `Attested: ${claim.inscriptionId} -> token #${claim.tokenId} ` +
+            `(tx: ${receipt.transactionId}, fee: ${receipt.estimatedFees} sats)`,
         );
+
+        return true;
     }
 
-    private resolveNetwork(name: 'mainnet' | 'testnet' | 'regtest'): Network {
+    private static resolveNetwork(name: string): Network {
         switch (name) {
-            case 'mainnet': return networks.bitcoin;
-            case 'testnet': return networks.testnet;
-            case 'regtest': return networks.regtest;
-            default: throw new Error(`Unknown network: ${String(name)}`);
+            case 'mainnet':
+                return networks.bitcoin;
+            case 'testnet':
+                return networks.testnet;
+            case 'regtest':
+                return networks.regtest;
+            default:
+                throw new Error(`Unknown network: ${name}`);
         }
     }
 }
