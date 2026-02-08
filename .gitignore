@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+contract/build/
+contract/node_modules/
+.env
+*.log
+.DS_Store
+*.tsbuildinfo

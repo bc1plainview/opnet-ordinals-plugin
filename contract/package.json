@@ -1,0 +1,22 @@
+{
+    "name": "@opnet/ordinals-bridge-nft",
+    "version": "1.0.0",
+    "description": "OP721 NFT contract for bridging Ordinals inscriptions",
+    "type": "module",
+    "scripts": {
+        "build": "asc src/index.ts --target bridge --measure --uncheckedBehavior never",
+        "clean": "rm -rf build"
+    },
+    "author": "",
+    "license": "MIT",
+    "devDependencies": {
+        "@types/node": "^25.0.10",
+        "assemblyscript": "^0.28.9"
+    },
+    "dependencies": {
+        "@assemblyscript/loader": "^0.28.9",
+        "@btc-vision/as-bignum": "^0.0.7",
+        "@btc-vision/btc-runtime": "^1.11.0-alpha.2",
+        "@btc-vision/opnet-transform": "^0.2.1"
+    }
+}
