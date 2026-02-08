@@ -65,11 +65,14 @@ class MockBridgeDatabase {
         confirmed: number;
         attested: number;
         failed: number;
+        underpaid: number;
     }> {
-        const stats = { total: 0, detected: 0, confirmed: 0, attested: 0, failed: 0 };
+        const stats = { total: 0, detected: 0, confirmed: 0, attested: 0, failed: 0, underpaid: 0 };
         for (const claim of this.claims.values()) {
             stats.total++;
-            stats[claim.status]++;
+            if (claim.status in stats) {
+                stats[claim.status as keyof typeof stats] += 1;
+            }
         }
         return stats;
     }
@@ -372,6 +375,67 @@ describe('BridgeService', () => {
             // Claim at 110 should be gone
             const claim3 = await bridge.getClaimStatus(`${TXID_A}i3`);
             expect(claim3).toBeNull();
+        });
+    });
+
+    describe('underpaid burns', () => {
+        let feeBridge: BridgeService;
+        let feeMockDb: MockBridgeDatabase;
+
+        beforeEach(() => {
+            const feeCollection = new CollectionRegistry('TestCats', 'TCAT');
+            feeCollection.loadItems(createSampleCollection(100));
+            feeMockDb = new MockBridgeDatabase();
+            feeBridge = new BridgeService(
+                feeCollection,
+                feeMockDb as unknown as BridgeDatabase,
+                BURN_ADDRESS,
+                6,
+                10000, // minFeeSats
+            );
+        });
+
+        it('should mark burn as underpaid when fee is insufficient', async () => {
+            const burn = createBurn(5);
+            // feePaid defaults to undefined (0), which is < 10000
+            const result = await feeBridge.processBurn(burn);
+
+            expect(result).not.toBeNull();
+
+            const claim = await feeBridge.getClaimStatus(`${TXID_A}i5`);
+            expect(claim!.status).toBe('underpaid');
+        });
+
+        it('should mark burn as detected when fee is sufficient', async () => {
+            const burn = { ...createBurn(5), feePaid: 15000 };
+            const result = await feeBridge.processBurn(burn);
+
+            expect(result).not.toBeNull();
+
+            const claim = await feeBridge.getClaimStatus(`${TXID_A}i5`);
+            expect(claim!.status).toBe('detected');
+        });
+
+        it('should not confirm underpaid claims', async () => {
+            const burn = createBurn(5, 100);
+            await feeBridge.processBurn(burn);
+
+            const confirmed = await feeBridge.confirmPendingClaims(106);
+            expect(confirmed).toBe(0);
+
+            const claim = await feeBridge.getClaimStatus(`${TXID_A}i5`);
+            expect(claim!.status).toBe('underpaid');
+        });
+
+        it('should include underpaid count in stats', async () => {
+            await feeBridge.processBurn(createBurn(1));
+            await feeBridge.processBurn({ ...createBurn(2), feePaid: 15000 });
+
+            const stats = await feeBridge.getStats();
+            expect(stats.underpaid).toBe(1);
+            expect(stats.detected).toBe(1);
+            expect(stats.total).toBe(2);
+            expect(stats.minFeeSats).toBe(10000);
         });
     });
 

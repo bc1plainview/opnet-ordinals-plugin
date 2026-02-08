@@ -30,6 +30,10 @@ function loadBridgeConfig(): BridgeConfig | undefined {
         collectionName: process.env.BRIDGE_COLLECTION_NAME || 'Ordinals Collection',
         collectionSymbol: process.env.BRIDGE_COLLECTION_SYMBOL || 'ORD',
         confirmations: parseInt(process.env.BRIDGE_CONFIRMATIONS || '6', 10),
+        deployerMnemonic: process.env.DEPLOYER_MNEMONIC || '',
+        contractAddress: process.env.BRIDGE_CONTRACT_ADDRESS || '',
+        oracleFeeAddress: process.env.ORACLE_FEE_ADDRESS || '',
+        minFeeSats: parseInt(process.env.BRIDGE_MIN_FEE_SATS || '0', 10),
     };
 }
 
@@ -65,6 +69,16 @@ async function main(): Promise<void> {
         console.log(`  Collection: ${bridgeConfig.collectionName} (${bridgeConfig.collectionSymbol})`);
         console.log(`  Collection File: ${bridgeConfig.collectionFile}`);
         console.log(`  Confirmations: ${bridgeConfig.confirmations}`);
+        if (bridgeConfig.contractAddress) {
+            console.log(`  Contract Address: ${bridgeConfig.contractAddress}`);
+        }
+        if (bridgeConfig.oracleFeeAddress) {
+            console.log(`  Oracle Fee Address: ${bridgeConfig.oracleFeeAddress}`);
+            console.log(`  Min Fee (sats): ${bridgeConfig.minFeeSats}`);
+        }
+        if (bridgeConfig.deployerMnemonic) {
+            console.log(`  Attestation Worker: ENABLED`);
+        }
     } else {
         console.log('Bridge: DISABLED (set BRIDGE_BURN_ADDRESS and BRIDGE_COLLECTION_FILE to enable)');
     }
@@ -104,6 +118,7 @@ export { CollectionRegistry } from './collection.js';
 export { BridgeService } from './bridge.js';
 export { BridgeDatabase } from './bridge-database.js';
 export { BridgeAPI } from './bridge-api.js';
+export { AttestationWorker } from './attestation-worker.js';
 export type {
     OrdinalsPluginConfig,
     Inscription,

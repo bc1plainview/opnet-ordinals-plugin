@@ -66,7 +66,8 @@ export type BurnClaimStatus =
     | 'detected'
     | 'confirmed'
     | 'attested'
-    | 'failed';
+    | 'failed'
+    | 'underpaid';
 
 /**
  * A burn claim tracks an ordinal inscription sent to the burn address.
@@ -111,4 +112,8 @@ export interface BridgeConfig {
     readonly collectionName: string;
     readonly collectionSymbol: string;
     readonly confirmations: number;
+    readonly deployerMnemonic: string;
+    readonly contractAddress: string;
+    readonly oracleFeeAddress: string;
+    readonly minFeeSats: number;
 }

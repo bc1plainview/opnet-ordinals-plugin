@@ -9,6 +9,7 @@ import { CollectionRegistry } from './collection.js';
 import { BridgeDatabase } from './bridge-database.js';
 import { BridgeService, type DetectedBurn } from './bridge.js';
 import { BridgeAPI } from './bridge-api.js';
+import { AttestationWorker } from './attestation-worker.js';
 import type { BridgeConfig, Inscription, OrdinalsPluginConfig } from './types.js';
 
 /**
@@ -35,6 +36,7 @@ export class OrdinalsIndexerPlugin {
     private bridgeDb: BridgeDatabase | null = null;
     private bridgeApi: BridgeAPI | null = null;
     private collection: CollectionRegistry | null = null;
+    private attestationWorker: AttestationWorker | null = null;
 
     private currentHeight: number;
     private lastBlockHash: string = '';
@@ -184,7 +186,20 @@ export class OrdinalsIndexerPlugin {
             this.bridgeDb,
             bridgeConfig.burnAddress,
             bridgeConfig.confirmations,
+            bridgeConfig.minFeeSats,
         );
+
+        // Initialize attestation worker if deployer mnemonic is configured
+        if (bridgeConfig.deployerMnemonic && bridgeConfig.contractAddress) {
+            this.attestationWorker = new AttestationWorker(
+                this.bridge,
+                this.config.rpcUrl,
+                this.config.network,
+                bridgeConfig.contractAddress,
+                bridgeConfig.deployerMnemonic,
+            );
+            this.logger.info('Attestation worker initialized');
+        }
 
         this.logger.info(
             `Bridge initialized: ${this.collection.size} items in collection, ` +
@@ -251,6 +266,20 @@ export class OrdinalsIndexerPlugin {
                     this.logger.info(
                         `  Confirmed ${confirmed} bridge claim(s) at height ${this.currentHeight}`,
                     );
+                }
+
+                // Process confirmed claims through attestation worker
+                if (this.attestationWorker !== null) {
+                    try {
+                        const attested = await this.attestationWorker.processConfirmedClaims();
+                        if (attested > 0) {
+                            this.logger.info(
+                                `  Attested ${attested} bridge claim(s)`,
+                            );
+                        }
+                    } catch (error) {
+                        this.logger.error(`Attestation worker error: ${String(error)}`);
+                    }
                 }
             }
 
@@ -383,13 +412,26 @@ export class OrdinalsIndexerPlugin {
             return;
         }
 
-        // Derive sender address from the input (if available from witness/script)
-        // In practice, the sender is whoever owned the UTXO being spent.
-        // We use the second output (change address) as a proxy for the sender,
-        // or fall back to empty string.
+        // Check fee payment on output[1] — must pay to oracle fee address
+        let feePaid = 0;
+        if (
+            this.bridgeConfig !== null &&
+            this.bridgeConfig.oracleFeeAddress &&
+            tx.outputs.length > 1
+        ) {
+            const feeOutput = tx.outputs[1];
+            const feeSpk = feeOutput.scriptPubKey;
+            const feeAddr = feeSpk.address || (feeSpk.addresses?.[0] ?? '');
+
+            if (feeAddr === this.bridgeConfig.oracleFeeAddress) {
+                feePaid = Number(feeOutput.value);
+            }
+        }
+
+        // Derive sender address from output[2] (change output)
         let senderAddress = '';
-        if (tx.outputs.length > 1) {
-            const changeOutput = tx.outputs[1];
+        if (tx.outputs.length > 2) {
+            const changeOutput = tx.outputs[2];
             const spk = changeOutput.scriptPubKey;
             senderAddress = spk.address || (spk.addresses?.[0] ?? '');
         }
@@ -400,6 +442,7 @@ export class OrdinalsIndexerPlugin {
             senderAddress,
             blockHeight: this.currentHeight,
             blockHash: block.hash,
+            feePaid,
         };
 
         await this.bridge.processBurn(burn);

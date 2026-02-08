@@ -42,6 +42,16 @@ export class BridgeAPI {
                     });
                 }
 
+                // Add helpful message for underpaid claims
+                if (claim.status === 'underpaid') {
+                    return res.json({
+                        ...claim,
+                        message:
+                            'Burn detected but the bridge fee was insufficient. ' +
+                            'Please re-submit with the required fee to the oracle fee address.',
+                    });
+                }
+
                 return res.json(claim);
             } catch (error) {
                 this.logger.error(`Error fetching claim status: ${String(error)}`);

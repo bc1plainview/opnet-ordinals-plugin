@@ -12,6 +12,7 @@ export interface DetectedBurn {
     readonly senderAddress: string;
     readonly blockHeight: number;
     readonly blockHash: string;
+    readonly feePaid?: number;
 }
 
 /**
@@ -32,17 +33,20 @@ export class BridgeService {
     private readonly db: BridgeDatabase;
     private readonly burnAddress: string;
     private readonly requiredConfirmations: number;
+    private readonly minFeeSats: number;
 
     public constructor(
         collection: CollectionRegistry,
         db: BridgeDatabase,
         burnAddress: string,
         requiredConfirmations: number = 6,
+        minFeeSats: number = 0,
     ) {
         this.collection = collection;
         this.db = db;
         this.burnAddress = burnAddress;
         this.requiredConfirmations = requiredConfirmations;
+        this.minFeeSats = minFeeSats;
     }
 
     /**
@@ -70,6 +74,10 @@ export class BridgeService {
             return null;
         }
 
+        // Check fee payment if a minimum fee is required
+        const feePaid = burn.feePaid ?? 0;
+        const isUnderpaid = this.minFeeSats > 0 && feePaid < this.minFeeSats;
+
         // Create a new burn claim
         const now = Date.now();
         const claim: BurnClaim = {
@@ -80,7 +88,7 @@ export class BridgeService {
             burnTxid: burn.txid,
             burnBlockHeight: burn.blockHeight,
             burnBlockHash: burn.blockHash,
-            status: 'detected',
+            status: isUnderpaid ? 'underpaid' : 'detected',
             attestTxid: null,
             createdAt: now,
             updatedAt: now,
@@ -88,10 +96,17 @@ export class BridgeService {
 
         await this.db.insertClaim(claim);
 
-        this.logger.info(
-            `Burn detected: ${burn.inscriptionId} -> token #${item.tokenId} ` +
-            `(sender: ${burn.senderAddress}, tx: ${burn.txid})`,
-        );
+        if (isUnderpaid) {
+            this.logger.warn(
+                `Burn underpaid: ${burn.inscriptionId} -> token #${item.tokenId} ` +
+                `(paid ${feePaid} sats, required ${this.minFeeSats} sats)`,
+            );
+        } else {
+            this.logger.info(
+                `Burn detected: ${burn.inscriptionId} -> token #${item.tokenId} ` +
+                `(sender: ${burn.senderAddress}, tx: ${burn.txid})`,
+            );
+        }
 
         return item;
     }
@@ -174,9 +189,11 @@ export class BridgeService {
         confirmed: number;
         attested: number;
         failed: number;
+        underpaid: number;
         collectionSize: number;
         burnAddress: string;
         requiredConfirmations: number;
+        minFeeSats: number;
     }> {
         const dbStats = await this.db.getStats();
         return {
@@ -184,6 +201,7 @@ export class BridgeService {
             collectionSize: this.collection.size,
             burnAddress: this.burnAddress,
             requiredConfirmations: this.requiredConfirmations,
+            minFeeSats: this.minFeeSats,
         };
     }
 

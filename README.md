@@ -6,14 +6,16 @@ Indexes Bitcoin Ordinals inscriptions on the OPNet blockchain and provides an op
 
 **Indexer** — Scans OPNet blocks via JSON-RPC, extracts Ordinals inscription envelopes from witness data, stores them in PostgreSQL, and exposes a REST API.
 
-**Bridge** (optional) — Monitors for inscriptions sent to a burn address. When a burn is detected and confirmed, the deployer/oracle calls `attestBurn()` on the OP721 contract to mint the corresponding NFT to the sender.
+**Bridge** (optional) — Monitors for inscriptions sent to a burn address. When a burn is detected and confirmed, an **attestation worker** automatically calls `attestBurn()` on the OP721 contract to mint the corresponding NFT to the sender. Users pay a configurable bridge fee to cover the deployer's on-chain transaction costs.
 
 ```
 Bitcoin Block → Plugin → Parser (witness envelopes) → PostgreSQL
                   ↓                                        ↓
             Burn Detector → Bridge Service            REST API
-                  ↓
-         attestBurn() → OP721 Contract → NFT minted
+                  ↓              ↓
+            Fee Check    Attestation Worker
+                  ↓              ↓
+         underpaid?     attestBurn() → OP721 Contract → NFT minted
 ```
 
 ## Prerequisites
@@ -52,6 +54,31 @@ Set both `BRIDGE_BURN_ADDRESS` and `BRIDGE_COLLECTION_FILE` to enable:
 | `BRIDGE_COLLECTION_NAME` | Display name for the collection |
 | `BRIDGE_COLLECTION_SYMBOL` | Symbol (e.g. `MC`) |
 | `BRIDGE_CONFIRMATIONS` | Block confirmations required before minting (default: `6`) |
+
+### Attestation Worker (optional)
+
+Set `DEPLOYER_MNEMONIC` and `BRIDGE_CONTRACT_ADDRESS` to enable automatic attestation:
+
+| Variable | Description |
+|----------|-------------|
+| `DEPLOYER_MNEMONIC` | BIP39 mnemonic for the contract deployer wallet |
+| `BRIDGE_CONTRACT_ADDRESS` | Deployed OP721 bridge contract address |
+| `ORACLE_FEE_ADDRESS` | Address where users pay the bridge fee (can be deployer's address) |
+| `BRIDGE_MIN_FEE_SATS` | Minimum sats required from user per burn (default: `0` = no fee) |
+
+### Bridge Fee Mechanism
+
+When `ORACLE_FEE_ADDRESS` and `BRIDGE_MIN_FEE_SATS` are set, users must include a fee payment in their burn transaction:
+
+```
+Output 0: inscription → burn address (the burn itself)
+Output 1: bridge fee  → oracle fee address (payment for attestation)
+Output 2: change      → back to sender (used to derive sender address)
+```
+
+If the fee is missing or insufficient, the burn is still recorded but marked as `underpaid` and will not be attested. The `/bridge/claim/:inscriptionId` endpoint shows a helpful message for underpaid claims.
+
+**Cost estimate**: Each `attestBurn()` costs ~5,000-15,000 sats in mining fees + OPNet gas. A safe default is `BRIDGE_MIN_FEE_SATS=10000`.
 
 ### Collection JSON Format
 
@@ -149,37 +176,54 @@ const nft = getContract<IOrdinalsBridgeNFTContract>(
 
 ```
 src/
-  index.ts            Entry point
-  plugin.ts           Main indexer + bridge orchestrator
-  parser.ts           Ordinals witness envelope parser
-  database.ts         PostgreSQL layer (inscriptions)
-  api.ts              REST API (inscriptions)
-  collection.ts       Collection registry (JSON loader)
-  bridge.ts           Bridge service (burn detection + claim lifecycle)
-  bridge-database.ts  PostgreSQL layer (burn claims)
-  bridge-api.ts       REST API (bridge)
-  bridge-abi.ts       Client-side ABI + TypeScript interface
-  types.ts            Shared type definitions
+  index.ts               Entry point
+  plugin.ts              Main indexer + bridge orchestrator
+  parser.ts              Ordinals witness envelope parser
+  database.ts            PostgreSQL layer (inscriptions)
+  api.ts                 REST API (inscriptions)
+  collection.ts          Collection registry (JSON loader)
+  bridge.ts              Bridge service (burn detection + claim lifecycle)
+  bridge-database.ts     PostgreSQL layer (burn claims)
+  bridge-api.ts          REST API (bridge)
+  bridge-abi.ts          Client-side ABI + TypeScript interface
+  attestation-worker.ts  Automatic attestBurn() transaction submitter
+  types.ts               Shared type definitions
 contract/
   src/
     OrdinalsBridgeNFT.ts   OP721 contract (AssemblyScript)
     index.ts               Contract entry point
 tests/
-  parser.test.ts           Inscription parser tests
-  integration.test.ts      Plugin integration tests
-  collection.test.ts       Collection registry tests
-  bridge.test.ts           Bridge service tests
-  bridge-database.test.ts  Bridge database tests
-  bridge-api.test.ts       Bridge API tests
+  parser.test.ts              Inscription parser tests
+  integration.test.ts         Plugin integration tests
+  collection.test.ts          Collection registry tests
+  bridge.test.ts              Bridge service tests
+  bridge-database.test.ts     Bridge database tests
+  bridge-api.test.ts          Bridge API tests
+  attestation-worker.test.ts  Attestation worker tests
 ```
+
+## Claim Lifecycle
+
+```
+detected → confirmed → attested
+    ↓          ↓
+underpaid    failed (→ retry → confirmed)
+```
+
+- **detected**: Burn seen on-chain, waiting for confirmations
+- **underpaid**: Burn seen but bridge fee insufficient (will not advance)
+- **confirmed**: Enough confirmations, ready for attestation
+- **attested**: `attestBurn()` submitted and accepted on-chain
+- **failed**: Attestation reverted or errored (can retry via `/bridge/retry-failed`)
 
 ## Trust Model
 
-The bridge uses an **oracle pattern**. The contract deployer is the trusted attestor who calls `attestBurn()` after verifying burns on-chain. This means:
+The bridge uses an **oracle pattern**. The contract deployer is the trusted attestor who calls `attestBurn()` after verifying burns on-chain. The attestation worker automates this process. This means:
 
 - Burns are irreversible (sent to an unspendable address)
 - Each inscription can only be bridged once (enforced on-chain)
 - The oracle must be trusted to honestly attest burns
+- The attestation worker uses the deployer's wallet to sign transactions
 
 This is the same trust model used by most cross-chain bridges (WBTC, etc.).
 

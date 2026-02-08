@@ -163,6 +163,7 @@ export class BridgeDatabase {
         confirmed: number;
         attested: number;
         failed: number;
+        underpaid: number;
     }> {
         const result: QueryResult = await this.pool.query(
             `SELECT status, COUNT(*) as count
@@ -170,7 +171,7 @@ export class BridgeDatabase {
              GROUP BY status`,
         );
 
-        const stats = { total: 0, detected: 0, confirmed: 0, attested: 0, failed: 0 };
+        const stats = { total: 0, detected: 0, confirmed: 0, attested: 0, failed: 0, underpaid: 0 };
         for (const row of result.rows) {
             const count = parseInt(row.count as string, 10);
             stats.total += count;

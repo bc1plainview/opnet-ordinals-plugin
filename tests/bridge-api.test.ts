@@ -110,11 +110,14 @@ class MockBridgeDatabase {
         confirmed: number;
         attested: number;
         failed: number;
+        underpaid: number;
     }> {
-        const stats = { total: 0, detected: 0, confirmed: 0, attested: 0, failed: 0 };
+        const stats = { total: 0, detected: 0, confirmed: 0, attested: 0, failed: 0, underpaid: 0 };
         for (const claim of this.claims.values()) {
             stats.total++;
-            stats[claim.status]++;
+            if (claim.status in stats) {
+                stats[claim.status as keyof typeof stats] += 1;
+            }
         }
         return stats;
     }
@@ -208,6 +211,31 @@ describe('BridgeAPI', () => {
             expect(body.collectionSize).toBe(10);
             expect(body.burnAddress).toBe(BURN_ADDRESS);
             expect(body.requiredConfirmations).toBe(6);
+            expect(body.minFeeSats).toBe(0);
+        });
+
+        it('should include fee info in stats when minFeeSats is set', async () => {
+            const collection = new CollectionRegistry('TestCats', 'TCAT');
+            collection.loadItems(createSampleCollection(10));
+            const db = new MockBridgeDatabase();
+            const bridge = new BridgeService(
+                collection,
+                db as unknown as BridgeDatabase,
+                BURN_ADDRESS,
+                6,
+                10000,
+            );
+            const api = new BridgeAPI(bridge);
+            const app = new MockApp();
+            api.registerRoutes(app as any);
+
+            const route = app.findRoute('GET', '/bridge/stats')!;
+            const req = new MockRequest();
+            const res = new MockResponse();
+            await route.handler(req, res);
+
+            const body = res.body as Record<string, unknown>;
+            expect(body.minFeeSats).toBe(10000);
         });
     });
 
@@ -224,6 +252,42 @@ describe('BridgeAPI', () => {
             expect(res.statusCode).toBe(404);
             const body = res.body as Record<string, unknown>;
             expect(body.error).toBe('No burn claim found for this inscription');
+        });
+
+        it('should return underpaid claim with helpful message', async () => {
+            const collection = new CollectionRegistry('TestCats', 'TCAT');
+            collection.loadItems(createSampleCollection(10));
+            const db = new MockBridgeDatabase();
+            const bridge = new BridgeService(
+                collection,
+                db as unknown as BridgeDatabase,
+                BURN_ADDRESS,
+                6,
+                10000, // minFeeSats
+            );
+            const api = new BridgeAPI(bridge);
+            const app = new MockApp();
+            api.registerRoutes(app as any);
+
+            // Insert an underpaid burn (no fee)
+            await bridge.processBurn({
+                txid: 'b'.repeat(64),
+                inscriptionId: `${TXID}i3`,
+                senderAddress: 'bc1qsender',
+                blockHeight: 100,
+                blockHash: 'c'.repeat(64),
+            });
+
+            const route = app.findRoute('GET', '/bridge/claim/:inscriptionId')!;
+            const req = new MockRequest();
+            req.params.inscriptionId = `${TXID}i3`;
+            const res = new MockResponse();
+            await route.handler(req, res);
+
+            expect(res.statusCode).toBe(200);
+            const body = res.body as Record<string, unknown>;
+            expect(body.status).toBe('underpaid');
+            expect(body.message).toContain('bridge fee was insufficient');
         });
 
         it('should return claim data when found', async () => {
